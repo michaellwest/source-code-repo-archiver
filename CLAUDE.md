@@ -6,7 +6,7 @@ PowerShell 7+ script (`Invoke-RepoArchiver.ps1`) that bulk-clones all visible re
 
 ## Key Files
 
-- `Invoke-RepoArchiver.ps1` — Main script (single file, ~780 lines)
+- `Invoke-RepoArchiver.ps1` — Main script (single file)
 - `repo-archiver-config.sample.json` — Sample config with credential placeholders
 - `repo-archiver-config.json` — Actual config (gitignored, contains secrets)
 - Output artifacts: `repo-archiver-manifest.json`, `repo-inventory-wip.json`, `repo-duplicates.json`
@@ -16,14 +16,19 @@ PowerShell 7+ script (`Invoke-RepoArchiver.ps1`) that bulk-clones all visible re
 - Single-file script organized with `#region` sections: Configuration, Manifest, API Helpers, GitLab Enumeration, Bitbucket Enumeration, Clone, WIP Inventory, Duplicate Detection
 - Entry point: `Invoke-RepoArchiver` function called at bottom of script
 - Parallel cloning via `ForEach-Object -Parallel` with function serialization (`$using:`)
+- A slim manifest lookup (SourceUpdatedAt + RootCommits only) is passed to parallel runspaces to reduce memory
 - GitLab enumeration returns `@{ Repos = ...; Skipped = ... }` hashtable (not a flat list)
 - Duplicate detection uses root commit SHA comparison across platforms
+- Default branch is resolved post-clone via `git symbolic-ref HEAD` (not from API)
+- Timestamps are normalized to UTC ISO-8601 on ingest (`ConvertTo-Iso8601`)
+- Config is validated by `Test-ArchiverConfig` before any API calls
 
 ## Config
 
 - **GitLab:** PAT auth via `PRIVATE-TOKEN` header
 - **Bitbucket Server (v7.21.3):** HTTP Access Token with `Bearer` auth
 - Defaults for missing keys are applied in `Read-ArchiverConfig`
+- Config validation rejects placeholder tokens and malformed URLs
 
 ## Commands
 
@@ -33,6 +38,9 @@ PowerShell 7+ script (`Invoke-RepoArchiver.ps1`) that bulk-clones all visible re
 
 # Dry run (enumerate only)
 ./Invoke-RepoArchiver.ps1 -DryRun
+
+# Incremental update (fetch --prune existing mirrors)
+./Invoke-RepoArchiver.ps1 -Update
 
 # Force re-clone unchanged repos
 ./Invoke-RepoArchiver.ps1 -Force
@@ -46,3 +54,5 @@ PowerShell 7+ script (`Invoke-RepoArchiver.ps1`) that bulk-clones all visible re
 - No test suite exists yet
 - `repo-archiver-config.json` contains secrets — never commit it
 - Bare mirror clones are kept as-is (no zip/compression)
+- Script exits with code 1 on config errors or clone failures
+- RunHistory in manifest is capped at 50 entries
