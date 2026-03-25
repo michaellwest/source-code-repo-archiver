@@ -43,7 +43,10 @@ param(
     [switch]$DryRun,
 
     [Parameter()]
-    [switch]$Force
+    [switch]$Force,
+
+    [Parameter()]
+    [switch]$Update
 )
 
 Set-StrictMode -Version Latest
@@ -382,6 +385,7 @@ function Invoke-RepoClone {
         [int]$RetryCount,
         [int]$RetryDelay,
         [switch]$Force,
+        [switch]$Update,
         [int]$TotalCount = 0
     )
 
@@ -398,10 +402,20 @@ function Invoke-RepoClone {
     $namespace = ($segments[0..($segments.Length - 2)]) -join [IO.Path]::DirectorySeparatorChar
     $repoDir   = Join-Path $OutputDirectory $platform $namespace "$repoName.git"
 
-    # Check manifest for skip logic
-    $existing = $Manifest.Repositories[$repoId]
-    if ($existing -and -not $Force) {
-        if ($existing.SourceUpdatedAt -eq $updatedAt -and (Test-Path $repoDir)) {
+    # ── Determine action: skip, fetch, or clone ──
+    $existing  = $Manifest.Repositories[$repoId]
+    $dirExists = Test-Path $repoDir
+    $isBare    = $false
+
+    if ($dirExists) {
+        $bareCheck = & git -C $repoDir rev-parse --is-bare-repository 2>$null
+        $isBare = ($LASTEXITCODE -eq 0 -and $bareCheck -eq 'true')
+    }
+
+    # Decide: skip / fetch / clone
+    $action = 'clone'
+    if ($dirExists -and $isBare) {
+        if (-not $Force -and -not $Update -and $existing -and $existing.SourceUpdatedAt -eq $updatedAt) {
             Write-Host "  ${progress}SKIP  $platform/$fullName (unchanged)" -ForegroundColor DarkGray
             return @{
                 Status      = 'Skipped'
@@ -409,6 +423,13 @@ function Invoke-RepoClone {
                 RootCommits = if ($existing.RootCommits) { $existing.RootCommits } else { @() }
             }
         }
+        $action = 'fetch'
+    }
+    elseif ($dirExists -and -not $isBare) {
+        # Corrupt or non-bare directory — remove and re-clone
+        Write-Warning "  ${progress}CORRUPT  $platform/$fullName — removing and re-cloning"
+        Remove-Item -Path $repoDir -Recurse -Force -ErrorAction SilentlyContinue
+        $action = 'clone'
     }
 
     # Ensure parent directory exists
@@ -417,23 +438,39 @@ function Invoke-RepoClone {
         New-Item -ItemType Directory -Path $parentDir -Force | Out-Null
     }
 
-    # Remove existing clone if re-cloning
-    if (Test-Path $repoDir) {
-        Remove-Item -Path $repoDir -Recurse -Force -ErrorAction SilentlyContinue
-    }
+    $success = $false
+    $resultStatus = if ($action -eq 'fetch') { 'Updated' } else { 'Archived' }
 
-    $cloneSuccess = $false
     for ($attempt = 1; $attempt -le $RetryCount; $attempt++) {
+        $stderrLog = $null
         try {
-            Write-Host "  ${progress}CLONE $platform/$fullName (attempt $attempt) ..." -ForegroundColor Yellow
             $stderrLog = Join-Path ([IO.Path]::GetTempPath()) "git_err_$([Guid]::NewGuid().ToString('N')).log"
-            $gitArgs = @('clone', '--mirror', $cloneUrl, $repoDir)
+
+            if ($action -eq 'fetch') {
+                Write-Host "  ${progress}FETCH $platform/$fullName (attempt $attempt) ..." -ForegroundColor Cyan
+                $gitArgs = @('-C', $repoDir, 'fetch', '--all', '--prune')
+            }
+            else {
+                Write-Host "  ${progress}CLONE $platform/$fullName (attempt $attempt) ..." -ForegroundColor Yellow
+                $gitArgs = @('clone', '--mirror', $cloneUrl, $repoDir)
+            }
+
             $proc = Start-Process -FilePath 'git' -ArgumentList $gitArgs -Wait -PassThru `
                 -RedirectStandardError $stderrLog -NoNewWindow
 
             if ($proc.ExitCode -ne 0) {
                 $gitError = if (Test-Path $stderrLog) { Get-Content $stderrLog -Raw } else { 'unknown error' }
                 $exitCode = $proc.ExitCode
+
+                # If fetch failed, fall back to full re-clone
+                if ($action -eq 'fetch' -and $attempt -eq $RetryCount) {
+                    Write-Warning "  ${progress}Fetch failed for $platform/$fullName — falling back to full re-clone"
+                    Remove-Item -Path $repoDir -Recurse -Force -ErrorAction SilentlyContinue
+                    $action = 'clone'
+                    $resultStatus = 'Archived'
+                    $attempt = 0  # Reset retry counter for the clone
+                    continue
+                }
 
                 $hint = switch ($exitCode) {
                     128 {
@@ -445,9 +482,9 @@ function Invoke-RepoClone {
                     }
                     default { "git exited with code $exitCode" }
                 }
-                throw "git clone exit code $exitCode — $hint`nstderr: $($gitError.Trim())"
+                throw "git exit code $exitCode — $hint`nstderr: $($gitError.Trim())"
             }
-            $cloneSuccess = $true
+            $success = $true
             break
         }
         catch {
@@ -455,14 +492,14 @@ function Invoke-RepoClone {
                 Write-Warning "  ${progress}FAIL  $platform/$fullName after $RetryCount attempts:`n    $_"
                 return @{ Status = 'Failed'; RepoId = $repoId; Error = $_.ToString(); RootCommits = @() }
             }
-            Write-Warning "  Clone failed (attempt $attempt/$RetryCount). Retrying in ${RetryDelay}s ..."
+            Write-Warning "  $action failed (attempt $attempt/$RetryCount). Retrying in ${RetryDelay}s ..."
             Start-Sleep -Seconds $RetryDelay
         }
         finally {
-            if (Test-Path $stderrLog -ErrorAction SilentlyContinue) {
+            if ($stderrLog -and (Test-Path $stderrLog -ErrorAction SilentlyContinue)) {
                 Remove-Item $stderrLog -Force -ErrorAction SilentlyContinue
             }
-            if (-not $cloneSuccess -and (Test-Path $repoDir)) {
+            if (-not $success -and $action -eq 'clone' -and (Test-Path $repoDir)) {
                 Remove-Item -Path $repoDir -Recurse -Force -ErrorAction SilentlyContinue
             }
         }
@@ -480,17 +517,28 @@ function Invoke-RepoClone {
         Write-Warning "  WARN  Could not extract root commits for $platform/$fullName"
     }
 
+    # ── Read default branch from bare repo ──
+    $defaultBranch = $null
+    try {
+        $headRef = & git -C $repoDir symbolic-ref HEAD 2>$null
+        if ($LASTEXITCODE -eq 0 -and $headRef) {
+            $defaultBranch = $headRef -replace '^refs/heads/', ''
+        }
+    }
+    catch { }
+
     # Calculate size of the bare repo
     $repoBytes = (Get-ChildItem -Path $repoDir -Recurse -File | Measure-Object -Property Length -Sum).Sum
 
     Write-Host "  ${progress}OK    $platform/$fullName -> $repoDir ($([math]::Round($repoBytes / 1MB, 1)) MB)" -ForegroundColor Green
 
     return @{
-        Status      = 'Archived'
-        RepoId      = $repoId
-        RepoPath    = $repoDir
-        RepoBytes   = $repoBytes
-        RootCommits = $rootCommits
+        Status        = $resultStatus
+        RepoId        = $repoId
+        RepoPath      = $repoDir
+        RepoBytes     = $repoBytes
+        RootCommits   = $rootCommits
+        DefaultBranch = $defaultBranch
     }
 }
 
@@ -755,15 +803,16 @@ function Invoke-RepoArchiver {
         $retryCount      = $using:config.RetryCount
         $retryDelay      = $using:config.RetryDelaySeconds
         $forceSwitch     = $using:Force
+        $updateSwitch    = $using:Update
         $total           = $using:totalCount
 
         Invoke-RepoClone -Repo $repo -OutputDirectory $outputDir `
             -Manifest $manifest -RetryCount $retryCount -RetryDelay $retryDelay `
-            -Force:$forceSwitch -TotalCount $total
+            -Force:$forceSwitch -Update:$updateSwitch -TotalCount $total
     }
 
     # ── Process results & update manifest ──
-    $archived = 0; $skipped = 0; $failed = 0
+    $archived = 0; $updated = 0; $skipped = 0; $failed = 0
 
     foreach ($r in $results) {
         if ($null -eq $r) { continue }
@@ -777,6 +826,17 @@ function Invoke-RepoArchiver {
                 $entry.RepoBytes       = $r.RepoBytes
                 $entry.LastStatus      = 'Archived'
                 $entry.RootCommits     = $r.RootCommits
+                if ($r.DefaultBranch) { $entry.DefaultBranch = $r.DefaultBranch }
+            }
+            'Updated' {
+                $updated++
+                $entry = $manifest.Repositories[$r.RepoId]
+                $entry.LastArchivedUtc = [DateTimeOffset]::UtcNow.ToString('o')
+                $entry.RepoPath        = $r.RepoPath
+                $entry.RepoBytes       = $r.RepoBytes
+                $entry.LastStatus      = 'Updated'
+                $entry.RootCommits     = $r.RootCommits
+                if ($r.DefaultBranch) { $entry.DefaultBranch = $r.DefaultBranch }
             }
             'Skipped'  {
                 $skipped++
@@ -799,9 +859,10 @@ function Invoke-RepoArchiver {
     $manifest.LastRunUtc = [DateTimeOffset]::UtcNow.ToString('o')
     $manifest.RunHistory += @{
         TimestampUtc = [DateTimeOffset]::UtcNow.ToString('o')
-        Mode         = 'Full'
+        Mode         = if ($Update) { 'Update' } elseif ($Force) { 'Force' } else { 'Full' }
         ReposFound   = $allRepos.Count
         Archived     = $archived
+        Updated      = $updated
         Skipped      = $skipped
         Failed       = $failed
         DurationSec  = [math]::Round(([DateTimeOffset]::UtcNow - $startTime).TotalSeconds, 1)
@@ -840,6 +901,7 @@ function Invoke-RepoArchiver {
     Write-Host "  Discovered    : $($allRepos.Count)" -ForegroundColor White
     Write-Host "  Inaccessible  : $($inaccessible.Count)" -ForegroundColor $(if ($inaccessible.Count -gt 0) { 'Yellow' } else { 'DarkGray' })
     Write-Host "  Archived      : $archived" -ForegroundColor Green
+    Write-Host "  Updated       : $updated" -ForegroundColor $(if ($updated -gt 0) { 'Cyan' } else { 'DarkGray' })
     Write-Host "  Skipped       : $skipped" -ForegroundColor DarkGray
     Write-Host "  Failed        : $failed" -ForegroundColor $(if ($failed -gt 0) { 'Red' } else { 'DarkGray' })
     Write-Host "  Duplicates    : $($duplicates.Count) group(s)" -ForegroundColor $(if ($duplicates.Count -gt 0) { 'Yellow' } else { 'DarkGray' })
