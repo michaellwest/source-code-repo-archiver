@@ -187,6 +187,19 @@ function Invoke-ApiWithRetry {
     }
 }
 
+function ConvertTo-Iso8601 {
+    param([object]$Value)
+
+    if ($null -eq $Value) { return $null }
+    if ($Value -is [string]) {
+        return ([DateTimeOffset]::Parse($Value)).ToUniversalTime().ToString('o')
+    }
+    if ($Value -is [long] -or $Value -is [int]) {
+        return ([DateTimeOffset]::FromUnixTimeMilliseconds($Value)).ToString('o')
+    }
+    return $Value.ToString()
+}
+
 #endregion
 
 #region ── GitLab Enumeration ─────────────────────────────────────────────────
@@ -234,7 +247,7 @@ function Get-GitLabRepositories {
                     FullName      = $p.path_with_namespace
                     CloneUrl      = $p.http_url_to_repo
                     DefaultBranch = $p.default_branch
-                    UpdatedAt     = $p.last_activity_at
+                    UpdatedAt     = ConvertTo-Iso8601 $p.last_activity_at
                     Description   = $p.description
                     AccessLevel   = $accessLevel
                     Visibility    = $p.visibility
@@ -334,7 +347,7 @@ function Get-BitbucketRepositories {
                 # Updated timestamp: not always present in Bitbucket Server repo list response
                 $updatedAt = $null
                 if ($r.PSObject.Properties['updatedDate']) {
-                    $updatedAt = $r.updatedDate
+                    $updatedAt = ConvertTo-Iso8601 $r.updatedDate
                 }
 
                 $repos.Add(@{
@@ -368,7 +381,8 @@ function Invoke-RepoClone {
         [hashtable]$Manifest,
         [int]$RetryCount,
         [int]$RetryDelay,
-        [switch]$Force
+        [switch]$Force,
+        [int]$TotalCount = 0
     )
 
     $platform  = $Repo.Platform
@@ -376,6 +390,7 @@ function Invoke-RepoClone {
     $repoId    = $Repo.Id
     $cloneUrl  = $Repo.CloneUrl
     $updatedAt = $Repo.UpdatedAt
+    $progress  = if ($TotalCount -gt 0 -and $Repo._Index) { "[$($Repo._Index)/$TotalCount] " } else { '' }
 
     # Build output path: OutputDir/Platform/namespace/repo.git
     $segments  = $fullName -split '/'
@@ -387,7 +402,7 @@ function Invoke-RepoClone {
     $existing = $Manifest.Repositories[$repoId]
     if ($existing -and -not $Force) {
         if ($existing.SourceUpdatedAt -eq $updatedAt -and (Test-Path $repoDir)) {
-            Write-Host "  SKIP  $platform/$fullName (unchanged)" -ForegroundColor DarkGray
+            Write-Host "  ${progress}SKIP  $platform/$fullName (unchanged)" -ForegroundColor DarkGray
             return @{
                 Status      = 'Skipped'
                 RepoId      = $repoId
@@ -410,7 +425,7 @@ function Invoke-RepoClone {
     $cloneSuccess = $false
     for ($attempt = 1; $attempt -le $RetryCount; $attempt++) {
         try {
-            Write-Host "  CLONE $platform/$fullName (attempt $attempt) ..." -ForegroundColor Yellow
+            Write-Host "  ${progress}CLONE $platform/$fullName (attempt $attempt) ..." -ForegroundColor Yellow
             $stderrLog = Join-Path ([IO.Path]::GetTempPath()) "git_err_$([Guid]::NewGuid().ToString('N')).log"
             $gitArgs = @('clone', '--mirror', $cloneUrl, $repoDir)
             $proc = Start-Process -FilePath 'git' -ArgumentList $gitArgs -Wait -PassThru `
@@ -437,7 +452,7 @@ function Invoke-RepoClone {
         }
         catch {
             if ($attempt -eq $RetryCount) {
-                Write-Warning "  FAIL  $platform/$fullName after $RetryCount attempts:`n    $_"
+                Write-Warning "  ${progress}FAIL  $platform/$fullName after $RetryCount attempts:`n    $_"
                 return @{ Status = 'Failed'; RepoId = $repoId; Error = $_.ToString(); RootCommits = @() }
             }
             Write-Warning "  Clone failed (attempt $attempt/$RetryCount). Retrying in ${RetryDelay}s ..."
@@ -468,7 +483,7 @@ function Invoke-RepoClone {
     # Calculate size of the bare repo
     $repoBytes = (Get-ChildItem -Path $repoDir -Recurse -File | Measure-Object -Property Length -Sum).Sum
 
-    Write-Host "  OK    $platform/$fullName -> $repoDir ($([math]::Round($repoBytes / 1MB, 1)) MB)" -ForegroundColor Green
+    Write-Host "  ${progress}OK    $platform/$fullName -> $repoDir ($([math]::Round($repoBytes / 1MB, 1)) MB)" -ForegroundColor Green
 
     return @{
         Status      = 'Archived'
@@ -720,6 +735,11 @@ function Invoke-RepoArchiver {
     }
 
     # ── Clone in parallel ──
+    $totalCount = $allRepos.Count
+    for ($i = 0; $i -lt $allRepos.Count; $i++) {
+        $allRepos[$i]._Index = $i + 1
+    }
+
     Write-Host "`nCloning ($($config.MaxParallel) parallel) ..." -ForegroundColor White
 
     # Serialize function body as string — $using: can't pass function references
@@ -735,10 +755,11 @@ function Invoke-RepoArchiver {
         $retryCount      = $using:config.RetryCount
         $retryDelay      = $using:config.RetryDelaySeconds
         $forceSwitch     = $using:Force
+        $total           = $using:totalCount
 
         Invoke-RepoClone -Repo $repo -OutputDirectory $outputDir `
             -Manifest $manifest -RetryCount $retryCount -RetryDelay $retryDelay `
-            -Force:$forceSwitch
+            -Force:$forceSwitch -TotalCount $total
     }
 
     # ── Process results & update manifest ──
