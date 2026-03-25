@@ -335,17 +335,7 @@ function Get-BitbucketRepositories {
                     $cloneLink = "$baseUrl/scm/$($proj.Key.ToLower())/$($r.slug).git"
                 }
 
-                # Default branch: Bitbucket Server doesn't return it in the list endpoint;
-                # use the repo's default branch endpoint or fall back to $null
-                $defaultBranch = $null
-                try {
-                    $branchUri = "$baseUrl/rest/api/1.0/projects/$($proj.Key)/repos/$($r.slug)/default-branch"
-                    $brResult  = Invoke-ApiWithRetry -Uri $branchUri -Headers $headers -RetryCount 1 -RetryDelay 0
-                    $defaultBranch = $brResult.Body.displayId
-                }
-                catch {
-                    # Non-fatal; repo may be empty or branch endpoint unavailable
-                }
+                # Default branch resolved post-clone via git symbolic-ref HEAD
 
                 # Updated timestamp: not always present in Bitbucket Server repo list response
                 $updatedAt = $null
@@ -358,7 +348,7 @@ function Get-BitbucketRepositories {
                     Id            = "bitbucket:$($proj.Key)/$($r.slug)"
                     FullName      = "$($proj.Key)/$($r.slug)"
                     CloneUrl      = $cloneLink
-                    DefaultBranch = $defaultBranch
+                    DefaultBranch = $null
                     UpdatedAt     = $updatedAt
                     Description   = if ($r.PSObject.Properties['description']) { $r.description } else { $null }
                 })
@@ -381,7 +371,7 @@ function Invoke-RepoClone {
     param(
         [hashtable]$Repo,
         [string]$OutputDirectory,
-        [hashtable]$Manifest,
+        [hashtable]$ManifestLookup,
         [int]$RetryCount,
         [int]$RetryDelay,
         [switch]$Force,
@@ -403,7 +393,7 @@ function Invoke-RepoClone {
     $repoDir   = Join-Path $OutputDirectory $platform $namespace "$repoName.git"
 
     # ── Determine action: skip, fetch, or clone ──
-    $existing  = $Manifest.Repositories[$repoId]
+    $existing  = $ManifestLookup[$repoId]
     $dirExists = Test-Path $repoDir
     $isBare    = $false
 
@@ -527,8 +517,13 @@ function Invoke-RepoClone {
     }
     catch { }
 
-    # Calculate size of the bare repo
-    $repoBytes = (Get-ChildItem -Path $repoDir -Recurse -File | Measure-Object -Property Length -Sum).Sum
+    # Calculate size of the bare repo via git internals (faster than filesystem walk)
+    $repoBytes = 0
+    $sizeOutput = & git -C $repoDir count-objects -v 2>$null
+    if ($sizeOutput) {
+        $match = $sizeOutput | Select-String '^size-pack:\s*(\d+)'
+        if ($match) { $repoBytes = [long]$match.Matches[0].Groups[1].Value * 1024 }
+    }
 
     Write-Host "  ${progress}OK    $platform/$fullName -> $repoDir ($([math]::Round($repoBytes / 1MB, 1)) MB)" -ForegroundColor Green
 
@@ -790,6 +785,15 @@ function Invoke-RepoArchiver {
 
     Write-Host "`nCloning ($($config.MaxParallel) parallel) ..." -ForegroundColor White
 
+    # Build slim manifest lookup for parallel runspaces (avoid serializing full manifest)
+    $manifestLookup = @{}
+    foreach ($kvp in $manifest.Repositories.GetEnumerator()) {
+        $manifestLookup[$kvp.Key] = @{
+            SourceUpdatedAt = $kvp.Value.SourceUpdatedAt
+            RootCommits     = if ($kvp.Value.RootCommits) { $kvp.Value.RootCommits } else { @() }
+        }
+    }
+
     # Serialize function body as string — $using: can't pass function references
     $repoCloneDef = ${function:Invoke-RepoClone}.ToString()
 
@@ -799,7 +803,7 @@ function Invoke-RepoArchiver {
 
         $repo            = $_
         $outputDir       = $using:config.OutputDirectory
-        $manifest        = $using:manifest
+        $lookup          = $using:manifestLookup
         $retryCount      = $using:config.RetryCount
         $retryDelay      = $using:config.RetryDelaySeconds
         $forceSwitch     = $using:Force
@@ -807,7 +811,7 @@ function Invoke-RepoArchiver {
         $total           = $using:totalCount
 
         Invoke-RepoClone -Repo $repo -OutputDirectory $outputDir `
-            -Manifest $manifest -RetryCount $retryCount -RetryDelay $retryDelay `
+            -ManifestLookup $lookup -RetryCount $retryCount -RetryDelay $retryDelay `
             -Force:$forceSwitch -Update:$updateSwitch -TotalCount $total
     }
 
