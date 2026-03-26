@@ -23,10 +23,18 @@
 .PARAMETER Force
     Re-clone repos even if they haven't changed since last run.
 
+.PARAMETER Update
+    Fetch updates into existing bare mirrors instead of re-cloning.
+
+.PARAMETER Checkout
+    Create a working copy alongside each bare mirror by cloning locally.
+    Output: Platform/Namespace/Repo (working tree) next to Platform/Namespace/Repo.git (bare mirror).
+
 .EXAMPLE
     ./Invoke-RepoArchiver.ps1
     ./Invoke-RepoArchiver.ps1 -ConfigPath "C:\configs\archiver.json" -DryRun
     ./Invoke-RepoArchiver.ps1 -Force
+    ./Invoke-RepoArchiver.ps1 -Update -Checkout
 
 .NOTES
     Author  : Generated for repo archival project
@@ -46,7 +54,10 @@ param(
     [switch]$Force,
 
     [Parameter()]
-    [switch]$Update
+    [switch]$Update,
+
+    [Parameter()]
+    [switch]$Checkout
 )
 
 Set-StrictMode -Version Latest
@@ -376,6 +387,7 @@ function Invoke-RepoClone {
         [int]$RetryDelay,
         [switch]$Force,
         [switch]$Update,
+        [switch]$Checkout,
         [int]$TotalCount = 0
     )
 
@@ -527,10 +539,57 @@ function Invoke-RepoClone {
 
     Write-Host "  ${progress}OK    $platform/$fullName -> $repoDir ($([math]::Round($repoBytes / 1MB, 1)) MB)" -ForegroundColor Green
 
+    # ── Create working copy from local bare mirror ──
+    $workingDir = $null
+    if ($Checkout) {
+        $workingDir = Join-Path $OutputDirectory $platform $namespace $repoName
+        try {
+            if (Test-Path $workingDir) {
+                # Pull latest from local mirror
+                $stderrLog2 = Join-Path ([IO.Path]::GetTempPath()) "git_err_$([Guid]::NewGuid().ToString('N')).log"
+                $proc2 = Start-Process -FilePath 'git' -ArgumentList @('-C', $workingDir, 'pull', '--ff-only') `
+                    -Wait -PassThru -RedirectStandardError $stderrLog2 -NoNewWindow
+                if (Test-Path $stderrLog2 -ErrorAction SilentlyContinue) {
+                    Remove-Item $stderrLog2 -Force -ErrorAction SilentlyContinue
+                }
+                if ($proc2.ExitCode -eq 0) {
+                    Write-Host "  ${progress}CHECKOUT  $platform/$fullName (updated working copy)" -ForegroundColor DarkCyan
+                }
+                else {
+                    # Pull failed — remove and re-clone from mirror
+                    Remove-Item -Path $workingDir -Recurse -Force -ErrorAction SilentlyContinue
+                    $proc2 = Start-Process -FilePath 'git' -ArgumentList @('clone', $repoDir, $workingDir) `
+                        -Wait -PassThru -NoNewWindow
+                    Write-Host "  ${progress}CHECKOUT  $platform/$fullName (re-cloned working copy)" -ForegroundColor DarkCyan
+                }
+            }
+            else {
+                $stderrLog2 = Join-Path ([IO.Path]::GetTempPath()) "git_err_$([Guid]::NewGuid().ToString('N')).log"
+                $proc2 = Start-Process -FilePath 'git' -ArgumentList @('clone', $repoDir, $workingDir) `
+                    -Wait -PassThru -RedirectStandardError $stderrLog2 -NoNewWindow
+                if (Test-Path $stderrLog2 -ErrorAction SilentlyContinue) {
+                    Remove-Item $stderrLog2 -Force -ErrorAction SilentlyContinue
+                }
+                if ($proc2.ExitCode -ne 0) {
+                    Write-Warning "  ${progress}CHECKOUT FAIL  $platform/$fullName — could not create working copy"
+                    $workingDir = $null
+                }
+                else {
+                    Write-Host "  ${progress}CHECKOUT  $platform/$fullName -> $workingDir" -ForegroundColor DarkCyan
+                }
+            }
+        }
+        catch {
+            Write-Warning "  ${progress}CHECKOUT FAIL  $platform/$fullName — $_"
+            $workingDir = $null
+        }
+    }
+
     return @{
         Status        = $resultStatus
         RepoId        = $repoId
         RepoPath      = $repoDir
+        WorkingDir    = $workingDir
         RepoBytes     = $repoBytes
         RootCommits   = $rootCommits
         DefaultBranch = $defaultBranch
@@ -808,11 +867,12 @@ function Invoke-RepoArchiver {
         $retryDelay      = $using:config.RetryDelaySeconds
         $forceSwitch     = $using:Force
         $updateSwitch    = $using:Update
+        $checkoutSwitch  = $using:Checkout
         $total           = $using:totalCount
 
         Invoke-RepoClone -Repo $repo -OutputDirectory $outputDir `
             -ManifestLookup $lookup -RetryCount $retryCount -RetryDelay $retryDelay `
-            -Force:$forceSwitch -Update:$updateSwitch -TotalCount $total
+            -Force:$forceSwitch -Update:$updateSwitch -Checkout:$checkoutSwitch -TotalCount $total
     }
 
     # ── Process results & update manifest ──
@@ -831,6 +891,7 @@ function Invoke-RepoArchiver {
                 $entry.LastStatus      = 'Archived'
                 $entry.RootCommits     = $r.RootCommits
                 if ($r.DefaultBranch) { $entry.DefaultBranch = $r.DefaultBranch }
+                if ($r.WorkingDir)    { $entry.WorkingDir = $r.WorkingDir }
             }
             'Updated' {
                 $updated++
@@ -841,6 +902,7 @@ function Invoke-RepoArchiver {
                 $entry.LastStatus      = 'Updated'
                 $entry.RootCommits     = $r.RootCommits
                 if ($r.DefaultBranch) { $entry.DefaultBranch = $r.DefaultBranch }
+                if ($r.WorkingDir)    { $entry.WorkingDir = $r.WorkingDir }
             }
             'Skipped'  {
                 $skipped++

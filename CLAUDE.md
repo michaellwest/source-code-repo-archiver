@@ -42,6 +42,12 @@ PowerShell 7+ script (`Invoke-RepoArchiver.ps1`) that bulk-clones all visible re
 # Incremental update (fetch --prune existing mirrors)
 ./Invoke-RepoArchiver.ps1 -Update
 
+# Create working copies alongside bare mirrors (for AI code analysis)
+./Invoke-RepoArchiver.ps1 -Checkout
+
+# Update + checkout combined
+./Invoke-RepoArchiver.ps1 -Update -Checkout
+
 # Force re-clone unchanged repos
 ./Invoke-RepoArchiver.ps1 -Force
 

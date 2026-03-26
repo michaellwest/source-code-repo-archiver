@@ -1,0 +1,17 @@
+{
+  "OutputDirectory": "./RepoArchive",
+  "ManifestPath": "./repo-archiver-manifest.json",
+  "MaxParallel": 4,
+  "RetryCount": 3,
+  "RetryDelaySeconds": 5,
+  "GitLab": {
+    "BaseUrl": "https://gitlab.yourcompany.com",
+    "PersonalAccessToken": "glpat-xxxxxxxxxxxxxxxxxxxx",
+    "Enabled": true
+  },
+  "Bitbucket": {
+    "BaseUrl": "https://bitbucket.yourcompany.com",
+    "HttpAccessToken": "xxxxxxxxxxxxxxxxxxxx",
+    "Enabled": true
+  }
+}
