@@ -425,7 +425,7 @@ function Invoke-RepoClone {
             return @{
                 Status      = 'Skipped'
                 RepoId      = $repoId
-                RootCommits = if ($existing.RootCommits) { $existing.RootCommits } else { @() }
+                RootCommits = if ($existing.PSObject.Properties['RootCommits'] -and $existing.RootCommits) { $existing.RootCommits } else { @() }
             }
         }
         $action = 'fetch'
@@ -915,7 +915,7 @@ function Invoke-RepoArchiver {
             }
             'Skipped'  {
                 $skipped++
-                if ($r.RootCommits -and $r.RootCommits.Count -gt 0) {
+                if ($r.PSObject.Properties['RootCommits'] -and $r.RootCommits -and $r.RootCommits.Count -gt 0) {
                     $manifest.Repositories[$r.RepoId].RootCommits = $r.RootCommits
                 }
             }
