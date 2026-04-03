@@ -224,74 +224,39 @@ function Get-GitLabRepositories {
     $baseUrl = $GitLabConfig.BaseUrl.TrimEnd('/')
     $headers = @{ 'PRIVATE-TOKEN' = $GitLabConfig.PersonalAccessToken }
     $repos   = [System.Collections.Generic.List[hashtable]]::new()
-    $skipped = [System.Collections.Generic.List[hashtable]]::new()
     $page    = 1
     $perPage = 100
-
-    # GitLab access levels: 10=Guest, 20=Reporter, 30=Developer, 40=Maintainer, 50=Owner
-    # Clone requires Developer (30) or higher via project/group membership,
-    # OR the project is public/internal with repo access enabled.
-    $minCloneLevel = 20  # Reporter can clone; Guest (10) cannot
 
     Write-Host "`n[GitLab] Enumerating projects from $baseUrl ..." -ForegroundColor Magenta
 
     do {
-        # Remove simple=true so we get the permissions block
-        $uri = "$baseUrl/api/v4/projects?membership=false&per_page=$perPage&page=$page&order_by=id&sort=asc"
+        # The PAT controls visibility — every project returned is cloneable via token auth
+        $uri = "$baseUrl/api/v4/projects?simple=true&per_page=$perPage&page=$page&order_by=id&sort=asc"
         $result = Invoke-ApiWithRetry -Uri $uri -Headers $headers -RetryCount $RetryCount -RetryDelay $RetryDelay
         $projects = $result.Body
 
         if ($null -eq $projects -or $projects.Count -eq 0) { break }
 
         foreach ($p in $projects) {
-            # Determine effective access level from project or group membership
-            $projectAccess = if ($p.permissions.project_access) { $p.permissions.project_access.access_level } else { $null }
-            $groupAccess   = if ($p.permissions.group_access)   { $p.permissions.group_access.access_level }   else { $null }
-            $accessLevel   = [math]::Max([int]($projectAccess ?? 0), [int]($groupAccess ?? 0))
-
-            # Public/internal repos are cloneable even without explicit membership
-            $isPublicOrInternal = $p.visibility -in @('public', 'internal')
-
-            $canClone = $isPublicOrInternal -or ($accessLevel -ge $minCloneLevel)
-
-            if ($canClone) {
-                $repos.Add(@{
-                    Platform      = 'GitLab'
-                    Id            = "gitlab:$($p.id)"
-                    FullName      = $p.path_with_namespace
-                    CloneUrl      = $p.http_url_to_repo
-                    DefaultBranch = $p.default_branch
-                    UpdatedAt     = ConvertTo-Iso8601 $p.last_activity_at
-                    Description   = $p.description
-                    AccessLevel   = $accessLevel
-                    Visibility    = $p.visibility
-                    AuthHeader    = "PRIVATE-TOKEN: $($GitLabConfig.PersonalAccessToken)"
-                })
-            }
-            else {
-                $skipped.Add(@{
-                    Id           = "gitlab:$($p.id)"
-                    FullName     = $p.path_with_namespace
-                    AccessLevel  = $accessLevel
-                    Visibility   = $p.visibility
-                    Reason       = "Insufficient access (level $accessLevel, need $minCloneLevel+)"
-                })
-            }
+            $repos.Add(@{
+                Platform      = 'GitLab'
+                Id            = "gitlab:$($p.id)"
+                FullName      = $p.path_with_namespace
+                CloneUrl      = $p.http_url_to_repo
+                DefaultBranch = $p.default_branch
+                UpdatedAt     = ConvertTo-Iso8601 $p.last_activity_at
+                Description   = $p.description
+                Visibility    = $p.visibility
+                AuthHeader    = "PRIVATE-TOKEN: $($GitLabConfig.PersonalAccessToken)"
+            })
         }
 
-        Write-Host "  Fetched page $page ($($projects.Count) projects, cloneable: $($repos.Count), skipped: $($skipped.Count))" -ForegroundColor DarkGray
+        Write-Host "  Fetched page $page ($($projects.Count) projects, total: $($repos.Count))" -ForegroundColor DarkGray
         $page++
     } while ($projects.Count -eq $perPage)
 
-    if ($skipped.Count -gt 0) {
-        Write-Host "[GitLab] Skipped $($skipped.Count) projects (insufficient clone access):" -ForegroundColor Yellow
-        foreach ($s in $skipped) {
-            Write-Host "  NOACCESS  $($s.FullName) (level=$($s.AccessLevel), visibility=$($s.Visibility))" -ForegroundColor DarkYellow
-        }
-    }
-
-    Write-Host "[GitLab] Found $($repos.Count) cloneable projects (skipped $($skipped.Count))." -ForegroundColor Green
-    return , @{ Repos = $repos; Skipped = $skipped }
+    Write-Host "[GitLab] Found $($repos.Count) cloneable projects." -ForegroundColor Green
+    return $repos
 }
 
 #endregion
@@ -771,15 +736,10 @@ function Invoke-RepoArchiver {
     $inaccessible   = [System.Collections.Generic.List[hashtable]]::new()
 
     if ($config.GitLab -and $config.GitLab.Enabled) {
-        $glResult = Get-GitLabRepositories -GitLabConfig $config.GitLab `
+        $glRepos = Get-GitLabRepositories -GitLabConfig $config.GitLab `
             -RetryCount $config.RetryCount -RetryDelay $config.RetryDelaySeconds
-        if ($glResult) {
-            if ($glResult.Repos -and $glResult.Repos.Count -gt 0) {
-                $allRepos.AddRange([hashtable[]]@($glResult.Repos))
-            }
-            if ($glResult.Skipped -and $glResult.Skipped.Count -gt 0) {
-                $inaccessible.AddRange([hashtable[]]@($glResult.Skipped))
-            }
+        if ($glRepos -and $glRepos.Count -gt 0) {
+            $allRepos.AddRange([hashtable[]]@($glRepos))
         }
     }
 

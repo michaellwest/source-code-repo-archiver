@@ -17,7 +17,7 @@ PowerShell 7+ script (`Invoke-RepoArchiver.ps1`) that bulk-clones all visible re
 - Entry point: `Invoke-RepoArchiver` function called at bottom of script
 - Parallel cloning via `ForEach-Object -Parallel` with function serialization (`$using:`)
 - A slim manifest lookup (SourceUpdatedAt + RootCommits only) is passed to parallel runspaces to reduce memory
-- GitLab enumeration returns `@{ Repos = ...; Skipped = ... }` hashtable (not a flat list)
+- GitLab enumeration returns a flat list of repos (PAT controls visibility; no access-level filtering)
 - Duplicate detection uses root commit SHA comparison across platforms
 - Default branch is resolved post-clone via `git symbolic-ref HEAD` (not from API)
 - Timestamps are normalized to UTC ISO-8601 on ingest (`ConvertTo-Iso8601`)
