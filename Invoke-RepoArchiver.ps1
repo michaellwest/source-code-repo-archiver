@@ -245,8 +245,8 @@ function Get-GitLabRepositories {
 
         foreach ($p in $projects) {
             # Determine effective access level from project or group membership
-            $projectAccess = $p.permissions.project_access.access_level
-            $groupAccess   = $p.permissions.group_access.access_level
+            $projectAccess = if ($p.permissions.project_access) { $p.permissions.project_access.access_level } else { $null }
+            $groupAccess   = if ($p.permissions.group_access)   { $p.permissions.group_access.access_level }   else { $null }
             $accessLevel   = [math]::Max([int]($projectAccess ?? 0), [int]($groupAccess ?? 0))
 
             # Public/internal repos are cloneable even without explicit membership
@@ -820,6 +820,13 @@ function Invoke-RepoArchiver {
             Visibility  = $skip.Visibility
             Reason      = $skip.Reason
             LastSeenUtc = [DateTimeOffset]::UtcNow.ToString('o')
+        }
+    }
+
+    # Remove repos from Inaccessible if they are now cloneable
+    foreach ($repo in $allRepos) {
+        if ($manifest.Inaccessible.ContainsKey($repo.Id)) {
+            $manifest.Inaccessible.Remove($repo.Id)
         }
     }
 
