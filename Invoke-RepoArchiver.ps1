@@ -425,7 +425,7 @@ function Invoke-RepoClone {
             return @{
                 Status      = 'Skipped'
                 RepoId      = $repoId
-                RootCommits = if ($existing.PSObject.Properties['RootCommits'] -and $existing.RootCommits) { $existing.RootCommits } else { @() }
+                RootCommits = if ($existing.PSObject.Properties['RootCommits'] -and $existing.PSObject.Properties['RootCommits'].Value) { $existing.PSObject.Properties['RootCommits'].Value } else { @() }
             }
         }
         $action = 'fetch'
@@ -454,7 +454,7 @@ function Invoke-RepoClone {
             # Build auth args for git HTTP authentication
             $authArgs = @()
             if ($authHeader) {
-                $authArgs = @('-c', "http.extraHeader=$authHeader")
+                $authArgs = @('-c', "`"http.extraHeader=$authHeader`"")
             }
 
             if ($action -eq 'fetch') {
@@ -633,7 +633,7 @@ function Save-WipInventory {
             Status        = if ($manifestEntry) { $manifestEntry.LastStatus } else { 'Pending' }
             RepoPath      = if ($manifestEntry) { $manifestEntry.RepoPath } else { $null }
             RepoBytes     = if ($manifestEntry) { $manifestEntry.RepoBytes } else { $null }
-            RootCommits   = if ($manifestEntry -and $manifestEntry.RootCommits) { $manifestEntry.RootCommits } else { @() }
+            RootCommits   = if ($manifestEntry -and $manifestEntry.ContainsKey('RootCommits') -and $manifestEntry['RootCommits']) { $manifestEntry['RootCommits'] } else { @() }
             LastArchivedUtc = if ($manifestEntry) { $manifestEntry.LastArchivedUtc } else { $null }
         }
         $entries.Add($entry)
@@ -680,7 +680,7 @@ function Find-DuplicateRepos {
     foreach ($kvp in $Manifest.Repositories.GetEnumerator()) {
         $repoId = $kvp.Key
         $entry  = $kvp.Value
-        $roots  = $entry.RootCommits
+        $roots  = if ($entry.ContainsKey('RootCommits')) { $entry['RootCommits'] } else { $null }
         if (-not $roots -or $roots.Count -eq 0) { continue }
 
         foreach ($sha in $roots) {
@@ -858,7 +858,7 @@ function Invoke-RepoArchiver {
     foreach ($kvp in $manifest.Repositories.GetEnumerator()) {
         $manifestLookup[$kvp.Key] = @{
             SourceUpdatedAt = $kvp.Value.SourceUpdatedAt
-            RootCommits     = if ($kvp.Value.RootCommits) { $kvp.Value.RootCommits } else { @() }
+            RootCommits     = if ($kvp.Value.ContainsKey('RootCommits') -and $kvp.Value['RootCommits']) { $kvp.Value['RootCommits'] } else { @() }
         }
     }
 
@@ -898,7 +898,8 @@ function Invoke-RepoArchiver {
                 $entry.RepoPath        = $r.RepoPath
                 $entry.RepoBytes       = $r.RepoBytes
                 $entry.LastStatus      = 'Archived'
-                $entry.RootCommits     = $r.RootCommits
+                $rRoots = if ($r.PSObject.Properties['RootCommits']) { $r.PSObject.Properties['RootCommits'].Value } else { @() }
+                $entry.RootCommits     = $rRoots
                 if ($r.DefaultBranch) { $entry.DefaultBranch = $r.DefaultBranch }
                 if ($r.WorkingDir)    { $entry.WorkingDir = $r.WorkingDir }
             }
@@ -909,14 +910,16 @@ function Invoke-RepoArchiver {
                 $entry.RepoPath        = $r.RepoPath
                 $entry.RepoBytes       = $r.RepoBytes
                 $entry.LastStatus      = 'Updated'
-                $entry.RootCommits     = $r.RootCommits
+                $rRoots = if ($r.PSObject.Properties['RootCommits']) { $r.PSObject.Properties['RootCommits'].Value } else { @() }
+                $entry.RootCommits     = $rRoots
                 if ($r.DefaultBranch) { $entry.DefaultBranch = $r.DefaultBranch }
                 if ($r.WorkingDir)    { $entry.WorkingDir = $r.WorkingDir }
             }
             'Skipped'  {
                 $skipped++
-                if ($r.PSObject.Properties['RootCommits'] -and $r.RootCommits -and $r.RootCommits.Count -gt 0) {
-                    $manifest.Repositories[$r.RepoId].RootCommits = $r.RootCommits
+                $rRoots = if ($r.PSObject.Properties['RootCommits']) { $r.PSObject.Properties['RootCommits'].Value } else { @() }
+                if ($rRoots -and $rRoots.Count -gt 0) {
+                    $manifest.Repositories[$r.RepoId].RootCommits = $rRoots
                 }
             }
             'Failed'   {
