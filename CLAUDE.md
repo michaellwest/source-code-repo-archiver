@@ -25,8 +25,9 @@ PowerShell 7+ script (`Invoke-RepoArchiver.ps1`) that bulk-clones all visible re
 
 ## Config
 
-- **GitLab:** PAT auth via `PRIVATE-TOKEN` header
-- **Bitbucket Server (v7.21.3):** HTTP Access Token with `Bearer` auth
+- **GitLab:** PAT auth via `PRIVATE-TOKEN` header (API and git operations)
+- **Bitbucket Server (v7.21.3):** HTTP Access Token with `Bearer` auth (API and git operations)
+- Git clone/fetch uses `-c http.extraHeader=` to pass auth tokens; each repo carries its `AuthHeader` from enumeration (not persisted to manifest)
 - Defaults for missing keys are applied in `Read-ArchiverConfig`
 - Config validation rejects placeholder tokens and malformed URLs
 

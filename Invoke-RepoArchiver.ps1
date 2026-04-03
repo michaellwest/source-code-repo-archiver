@@ -265,6 +265,7 @@ function Get-GitLabRepositories {
                     Description   = $p.description
                     AccessLevel   = $accessLevel
                     Visibility    = $p.visibility
+                    AuthHeader    = "PRIVATE-TOKEN: $($GitLabConfig.PersonalAccessToken)"
                 })
             }
             else {
@@ -362,6 +363,7 @@ function Get-BitbucketRepositories {
                     DefaultBranch = $null
                     UpdatedAt     = $updatedAt
                     Description   = if ($r.PSObject.Properties['description']) { $r.description } else { $null }
+                    AuthHeader    = "Authorization: Bearer $($BitbucketConfig.HttpAccessToken)"
                 })
             }
 
@@ -391,12 +393,13 @@ function Invoke-RepoClone {
         [int]$TotalCount = 0
     )
 
-    $platform  = $Repo.Platform
-    $fullName  = $Repo.FullName
-    $repoId    = $Repo.Id
-    $cloneUrl  = $Repo.CloneUrl
-    $updatedAt = $Repo.UpdatedAt
-    $progress  = if ($TotalCount -gt 0 -and $Repo._Index) { "[$($Repo._Index)/$TotalCount] " } else { '' }
+    $platform   = $Repo.Platform
+    $fullName   = $Repo.FullName
+    $repoId     = $Repo.Id
+    $cloneUrl   = $Repo.CloneUrl
+    $updatedAt  = $Repo.UpdatedAt
+    $authHeader = $Repo.AuthHeader
+    $progress   = if ($TotalCount -gt 0 -and $Repo._Index) { "[$($Repo._Index)/$TotalCount] " } else { '' }
 
     # Build output path: OutputDir/Platform/namespace/repo.git
     $segments  = $fullName -split '/'
@@ -448,13 +451,19 @@ function Invoke-RepoClone {
         try {
             $stderrLog = Join-Path ([IO.Path]::GetTempPath()) "git_err_$([Guid]::NewGuid().ToString('N')).log"
 
+            # Build auth args for git HTTP authentication
+            $authArgs = @()
+            if ($authHeader) {
+                $authArgs = @('-c', "http.extraHeader=$authHeader")
+            }
+
             if ($action -eq 'fetch') {
                 Write-Host "  ${progress}FETCH $platform/$fullName (attempt $attempt) ..." -ForegroundColor Cyan
-                $gitArgs = @('-C', $repoDir, 'fetch', '--all', '--prune')
+                $gitArgs = $authArgs + @('-C', $repoDir, 'fetch', '--all', '--prune')
             }
             else {
                 Write-Host "  ${progress}CLONE $platform/$fullName (attempt $attempt) ..." -ForegroundColor Yellow
-                $gitArgs = @('clone', '--mirror', $cloneUrl, $repoDir)
+                $gitArgs = $authArgs + @('clone', '--mirror', $cloneUrl, $repoDir)
             }
 
             $proc = Start-Process -FilePath 'git' -ArgumentList $gitArgs -Wait -PassThru `
