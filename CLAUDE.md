@@ -49,6 +49,9 @@ PowerShell 7+ script (`Invoke-RepoArchiver.ps1`) that bulk-clones all visible re
 # Update + checkout combined
 ./Invoke-RepoArchiver.ps1 -Update -Checkout
 
+# Remove working copies to reclaim disk space (cannot combine with -Checkout)
+./Invoke-RepoArchiver.ps1 -RemoveCheckouts
+
 # Force re-clone unchanged repos
 ./Invoke-RepoArchiver.ps1 -Force
 

@@ -29,12 +29,19 @@
 .PARAMETER Checkout
     Create a working copy alongside each bare mirror by cloning locally.
     Output: Platform/Namespace/Repo (working tree) next to Platform/Namespace/Repo.git (bare mirror).
+    Cannot be used with -RemoveCheckouts.
+
+.PARAMETER RemoveCheckouts
+    Remove all working copies previously created by -Checkout to reclaim disk space.
+    Operates standalone — scans the output directory for non-.git directories next to bare mirrors.
+    Cannot be used with -Checkout.
 
 .EXAMPLE
     ./Invoke-RepoArchiver.ps1
     ./Invoke-RepoArchiver.ps1 -ConfigPath "C:\configs\archiver.json" -DryRun
     ./Invoke-RepoArchiver.ps1 -Force
     ./Invoke-RepoArchiver.ps1 -Update -Checkout
+    ./Invoke-RepoArchiver.ps1 -RemoveCheckouts
 
 .NOTES
     Author  : Generated for repo archival project
@@ -57,7 +64,10 @@ param(
     [switch]$Update,
 
     [Parameter()]
-    [switch]$Checkout
+    [switch]$Checkout,
+
+    [Parameter()]
+    [switch]$RemoveCheckouts
 )
 
 Set-StrictMode -Version Latest
@@ -722,9 +732,60 @@ function Invoke-RepoArchiver {
         return
     }
 
+    # ── Validate switches ──
+    if ($Checkout -and $RemoveCheckouts) {
+        Write-Error "-Checkout and -RemoveCheckouts cannot be used together."
+        $script:exitCode = 1
+        return
+    }
+
     # ── Validate git ──
     if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
         Write-Error "git executable not found in PATH. Install git and try again."
+        return
+    }
+
+    # ── Remove working copies (standalone) ──
+    if ($RemoveCheckouts) {
+        $outDir = $config.OutputDirectory
+        if (-not (Test-Path $outDir)) {
+            Write-Warning "Output directory '$outDir' does not exist. Nothing to remove."
+            return
+        }
+
+        Write-Host "`nScanning for working copies in $outDir ..." -ForegroundColor White
+        $removed = 0
+        $bytesFreed = [long]0
+
+        # Working copies sit alongside bare mirrors: Platform/Namespace/Repo next to Repo.git
+        Get-ChildItem -Path $outDir -Directory -Recurse -Filter '*.git' | ForEach-Object {
+            $bareDir = $_.FullName
+            $workingDir = $bareDir -replace '\.git$', ''
+            if ((Test-Path $workingDir) -and (Test-Path (Join-Path $workingDir '.git'))) {
+                $dirSize = (Get-ChildItem -Path $workingDir -Recurse -File -ErrorAction SilentlyContinue |
+                    Measure-Object -Property Length -Sum).Sum
+                Write-Host "  REMOVE  $($workingDir.Substring($outDir.Length + 1))" -ForegroundColor Yellow
+                Remove-Item -Path $workingDir -Recurse -Force
+                $removed++
+                $bytesFreed += $dirSize
+            }
+        }
+
+        # Also clear WorkingDir from manifest entries
+        $manifest = Read-Manifest -Path $config.ManifestPath
+        $cleared = 0
+        foreach ($kvp in $manifest.Repositories.GetEnumerator()) {
+            if ($kvp.Value.ContainsKey('WorkingDir') -and $kvp.Value['WorkingDir']) {
+                $kvp.Value['WorkingDir'] = $null
+                $cleared++
+            }
+        }
+        if ($cleared -gt 0) {
+            Save-Manifest -Manifest $manifest -Path $config.ManifestPath
+        }
+
+        $freedMB = [math]::Round($bytesFreed / 1MB, 1)
+        Write-Host "`nRemoved $removed working copy/copies ($freedMB MB freed)." -ForegroundColor Green
         return
     }
 
@@ -853,6 +914,7 @@ function Invoke-RepoArchiver {
 
     # ── Process results & update manifest ──
     $archived = 0; $updated = 0; $skipped = 0; $failed = 0
+    $failures = [System.Collections.Generic.List[hashtable]]::new()
 
     foreach ($r in $results) {
         if ($null -eq $r) { continue }
@@ -891,8 +953,11 @@ function Invoke-RepoArchiver {
             }
             'Failed'   {
                 $failed++
-                if ($manifest.Repositories.ContainsKey($r.RepoId)) {
-                    $manifest.Repositories[$r.RepoId].LastStatus = "Failed: $($r.Error)"
+                $errorMsg = if ($r.PSObject.Properties['Error']) { $r.PSObject.Properties['Error'].Value } else { 'Unknown error' }
+                $repoName = if ($r.PSObject.Properties['RepoId']) { $r.PSObject.Properties['RepoId'].Value } else { '?' }
+                $failures.Add(@{ RepoId = $repoName; Error = $errorMsg })
+                if ($manifest.Repositories.ContainsKey($repoName)) {
+                    $manifest.Repositories[$repoName].LastStatus = "Failed: $errorMsg"
                 }
             }
         }
@@ -953,6 +1018,32 @@ function Invoke-RepoArchiver {
     Write-Host "  Duration    : ${duration}s" -ForegroundColor White
     Write-Host "  Manifest    : $($config.ManifestPath)" -ForegroundColor White
     Write-Host "──────────────────────────────────────────────`n" -ForegroundColor White
+
+    # ── Error Summary (grouped by similar message) ──
+    if ($failures.Count -gt 0) {
+        Write-Host "── Failed Repositories ───────────────────────" -ForegroundColor Red
+
+        # Extract a short error category from the full message for grouping
+        $grouped = $failures | Group-Object -Property {
+            $msg = $_.Error
+            # Normalise: take the hint line (before stderr:) as the group key
+            if ($msg -match '^git exit code \d+ — (.+?)(?:\r?\nstderr:|$)') {
+                $Matches[1].Trim()
+            }
+            else {
+                # Fallback: first line, trimmed
+                ($msg -split '\r?\n')[0].Trim()
+            }
+        }
+
+        foreach ($group in $grouped) {
+            Write-Host "`n  [$($group.Count)] $($group.Name)" -ForegroundColor Red
+            foreach ($f in $group.Group) {
+                Write-Host "       - $($f.RepoId)" -ForegroundColor DarkRed
+            }
+        }
+        Write-Host "`n──────────────────────────────────────────────`n" -ForegroundColor Red
+    }
 }
 
 # ── Entry Point ──
